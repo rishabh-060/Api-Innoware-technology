@@ -21,7 +21,7 @@ app.use(cookieParser())
 import { userRouter } from "./routes/userRouter.js";
 import { publicRouter } from "./routes/publicRouter.js";
 
-app.get("/", (req, res) => {
+app.get("/api", (req, res) => {
     return res.status(200).json({
         message: "Welcome to the Innoware API",
         status: "success"
