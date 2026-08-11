@@ -86,9 +86,7 @@ jobs:
           
           # Copy the deployment package to the EC2 instance
           ssh -i private_key.pem -o StrictHostKeyChecking=no \
-            ${EC2_USERNAME}@${HOST} "mkdir -p ~/temp"
-          ssh -i private_key.pem -o StrictHostKeyChecking=no \
-            ${EC2_USERNAME}@${HOST} "cp ~/temp/deploy.tar.gz /var/www/Innoware-BE/"
+            deploy.tar.gz ${EC2_USERNAME}@${HOST}:~/temp/deploy.tar.gz
           
           # SSH into the EC2 instance and deploy
           ssh -i private_key.pem -o StrictHostKeyChecking=no \
