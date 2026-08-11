@@ -81,11 +81,11 @@ jobs:
           HOST="${HOST%/}"
 
           # Ensure the temp directory exists on the EC2 instance
-          scp -i private_key.pem -o StrictHostKeyChecking=no \
+          ssh -i private_key.pem -o StrictHostKeyChecking=no \
             ${EC2_USERNAME}@${HOST} "mkdir -p ~/temp"
           
           # Copy the deployment package to the EC2 instance
-          scp -i private_key.pem -o StrictHostKeyChecking=no \
+          ssh -i private_key.pem -o StrictHostKeyChecking=no \
             deploy.tar.gz ${EC2_USERNAME}@${HOST}:~/temp/deploy.tar.gz
           
           # SSH into the EC2 instance and deploy
