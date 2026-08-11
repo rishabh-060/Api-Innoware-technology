@@ -1,0 +1,237 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    name: Build the project
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '24.x'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build the project
+        run: npm run build
+
+      - name: Create Deployement Package (without node_modules)
+        run: |
+          mkdir -p deploy
+          if [ -d dist ]; then
+            cp -r dist deploy/
+          else
+            echo "dist directory not found, skipping copy."
+          fi
+          if [ -d src ]; then
+            cp -r src deploy/
+          else
+            echo "src directory not found, skipping copy."
+          fi
+          cp package.json deploy/
+          if [ -f .env.example ]; then
+            cp .env.example deploy/
+          else
+            echo ".env.example not found, skipping copy."
+          fi
+          tar -czf deploy.tar.gz -C deploy .
+        
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-package
+          path: deploy.tar.gz
+          retention-days: 1
+
+  deploy:
+    name: Deploy the project on EC2
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: deployment-package
+        
+      - name: Deploy to EC2 via SSH
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
+          SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
+
+        run: |
+          # Create SSH key file
+          echo "$SSH_PRIVATE_KEY" > private_key.pem
+          chmod 600 private_key.pem
+
+          # Senitize host to remove protocol scheme and trailing slash
+          HOST="${EC2_HOST#http://}"
+          HOST="${HOST#https://}"
+          HOST="${HOST%/}"
+
+          # Ensure the temp directory exists on the EC2 instance
+          scp -i private_key.pem -o StrictHostKeyChecking=no \
+            ${EC2_USERNAME}@${HOST} "mkdir -p ~/temp"
+          
+          # Copy the deployment package to the EC2 instance
+          scp -i private_key.pem -o StrictHostKeyChecking=no \
+            deploy.tar.gz ${EC2_USERNAME}@${HOST}:~/temp/deploy.tar.gz
+          
+          # SSH into the EC2 instance and deploy
+          ssh -i private_key.pem -o StrictHostKeyChecking=no \
+            ${EC2_USERNAME}@${HOST} << 'EOF'
+
+            # Navigate to the application directory
+            cd /var/www/Innoware-BE
+
+            # Fix Ownership and Permissions(important)
+            sudo chown -R $USER:$USER /var/www/Innoware-BE
+
+            # Backup the current deployment
+            if [ -d "current" ]; then
+              timestamp=$(date +%Y%m%d%H%M%S)
+              mkdir -p backups
+              tar -czf backups/backup_$timestamp.tar.gz dist src package.json .env.example 2> /dev/null || true
+
+              # keep only the last 5 backups
+              ls -tp backups/backup_*.tar.gz 2> /dev/null | tail -n +6 | xargs -I {} rm -- {}
+            fi
+
+            # Extract the new deployment package
+            tar --overwrite -xzf ~/temp/deploy.tar.gz -C /var/www/Innoware-BE
+            rm ~/temp/deploy.tar.gz
+
+            # Fix Ownership and Permissions(important)
+            sudo chown -R $USER:$USER /var/www/Innoware-BE
+
+            # Install dependencies
+            npm install
+
+            # Create .env file if it doesn't exist (only for the first deployment)
+            if [ ! -f ".env" ]; then
+              echo "PORT=8080" > .env
+              echo "MONGODB_URI=mongodb+srv://rv915238:qwerty%403435@scan-my-meal.8yr00w6.mongodb.net" >> .env
+              echo "CORS_ORIGIN=http://localhost:5173" >> .env
+              echo "ACCESS_TOKEN_SECRET=dcfvgbhnjmktyeuijskodl485635345443!@$%^&IOIJHVC6hgfdsftyuiop65ghfijkop26" >> .env
+              echo "ACCESS_TOKEN_EXPIRY=1d" >> .env
+              echo "REFRESH_TOKEN_SECRET=fghjk$%^&*0987654jjhy$%^&*iweuryweieehriwre349woeriweslfwe$%^&^R^%&THprlwefreughrefiefhreidgredghbrdck6516s4eg4lrptlretfe6fe" >> .env
+              echo "REFRESH_TOKEN_EXPIRY=7d" >> .env
+              echo "CLOUDINARY_CLOUD_NAME=do71wpv4t" >> .env
+              echo "CLOUDINARY_API_KEY=121266826593187" >> .env
+              echo "CLOUDINARY_API_SECRET=QNXCb2HVCy4jC-8tJFp9aFU1aNQ" >> .env
+              echo "NODEMAILER_App_id=innoware108@gmail.com" >> .env
+              echo "NODEMAILER_App_Pass=bzkogoahlonktvzv" >> .env
+            fi
+
+            # Create logs directory
+            mkdir -p logs
+
+            # Zero downtime restart using pm2
+            if pm2 describe Innoware-BE > /dev/null; then
+              sudo pm2 reload Innoware-BE
+            else
+              sudo pm2 start npm --name "Innoware-BE" -- start
+            fi
+
+            # save pm2 process list and configure startup
+            sudo pm2 save
+            sudo pm2 startup
+
+          EOF
+
+          # Clean up the private key file
+          rm private_key.pem
+      
+      - name: Verify Deployment
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+
+        run: |
+          # Sanitize host to remove protocol scheme and trailing slash
+          HOST="${EC2_HOST#http://}"
+          HOST="${HOST#https://}"
+          HOST="${HOST%/}"
+
+          echo "Waiting for the application to be available..."
+          sleep 10  # Wait for a few seconds before checking
+
+          # Check if the application is running via nginx (try multiple times)
+          for i in {1..5}; do
+            echo "Attempt $i: Checking application response..."
+            response=$(curl -s -o /dev/null -w "%{http_code}" http://${HOST} 2>/dev/null || echo "000")
+
+            if [ "$response" = "200" ] || [ "$response" = "301" ] || [ "$response" = "302" ]; then
+              echo "Deployment successful! Application is running at http://$HOST"
+              exit 0
+            else
+              echo "Attempt $i: Application not yet available. Retrying in 10 seconds..."
+              sleep 5
+            fi
+
+            echo "Got response code: $response, waiting for 5 seconds before next attempt..."
+            sleep 5
+          done
+
+          echo "Application did not respond as expected after multiple attempts. Please check the server logs."
+          exit 1
+        
+      - name: Rollback on Failure
+        if: failure()
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
+          SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
+
+        run: |
+          echo "Deployment failed. Initiating rollback to previous version..."
+
+          # Create SSH key file
+          echo "$SSH_PRIVATE_KEY" > private_key.pem
+          chmod 600 private_key.pem
+
+          # Sanitize host to remove protocol scheme and trailing slash
+          HOST="${EC2_HOST#http://}"
+          HOST="${HOST#https://}"
+          HOST="${HOST%/}"
+
+          # SSH into the EC2 instance and perform rollback
+          ssh -i private_key.pem -o StrictHostKeyChecking=no \
+            ${EC2_USERNAME}@${HOST} << 'EOF'
+
+            # Navigate to the application directory
+            cd /var/www/Innoware-BE
+
+            # Fix ownership and permissions (important)
+            sudo chown -R $USER:$USER /var/www/Innoware-BE
+
+            # Find the latest backup and restore it
+            latest_backup=$(ls -t backups/backup_*.tar.gz 2> /dev/null | head -n 1)
+
+            if [ -n "$latest_backup" ]; then
+              echo "Restoring from backup: $latest_backup"
+              tar --overwrite -xzf "$latest_backup" -C /var/www/Innoware-BE
+              
+              npm install
+              # Restart the application using pm2
+              pm2 reload Innoware-BE || pm2 start npm --name "Innoware-BE" -- start
+              pm2 save
+            else
+              echo "No backup found. Rollback not possible."
+              exit 1
+            fi
+
+          EOF
+
+          # Clean up the private key file
+          rm private_key.pem
