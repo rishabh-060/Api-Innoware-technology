@@ -85,7 +85,7 @@ jobs:
             ${EC2_USERNAME}@${HOST} "mkdir -p ~/temp"
           
           # Copy the deployment package to the EC2 instance
-          ssh -i private_key.pem -o StrictHostKeyChecking=no \
+          scp -i private_key.pem -o StrictHostKeyChecking=no \
             deploy.tar.gz ${EC2_USERNAME}@${HOST}:~/temp/deploy.tar.gz
           
           # SSH into the EC2 instance and deploy
